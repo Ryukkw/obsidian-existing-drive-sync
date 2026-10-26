@@ -1,0 +1,10 @@
+{
+  "id": "existing-drive-sync",
+  "name": "Existing Drive Sync",
+  "version": "0.1.2",
+  "minAppVersion": "1.11.4",
+  "description": "Two-way sync of a local vault with an existing Google Drive folder, including attachments and conflict copies.",
+  "author": "Ryukkw",
+  "isDesktopOnly": false,
+  "authorUrl": "https://github.com/Ryukkw"
+}
