@@ -130,6 +130,25 @@ describe('Drive transport',()=>{
     expect((await drive.write('empty.md',empty)).hash).toBe(hash(empty));
     expect(calls.at(-1)?.headers?.['Content-Range']).toBe('bytes */0');
   });
+  it('does not issue another request after cancellation during token refresh',async()=>{
+    const controller=new AbortController();let apiCalls=0;
+    const drive=new Drive(credentials,'root','.obsidian',async p=>{
+      if(p.url.endsWith('/token')){controller.abort();return reply({access_token:'access',expires_in:3600});}
+      apiCalls++;return reply({});
+    },controller.signal);
+    await expect(drive.listFolders()).rejects.toThrow('выгрузке');expect(apiCalls).toBe(0);
+  });
+  it('stops a stale resumable upload after the in-flight chunk settles',async()=>{
+    const controller=new AbortController();const content=new ArrayBuffer(1024*1024+5);let chunks=0;
+    const drive=new Drive(credentials,'root','.obsidian',async p=>{
+      if(p.url.endsWith('/token'))return reply({access_token:'access',expires_in:3600});
+      if(p.url.includes('/files?')&&!p.url.includes('/upload/'))return reply({items:[]});
+      if(p.url.includes('uploadType=resumable'))return reply({},200,{location:'https://www.googleapis.com/session'});
+      if(p.url.endsWith('/session')){chunks++;controller.abort();return reply({},308,{range:'bytes=0-1048575'});}
+      throw new Error('Unexpected URL');
+    },controller.signal);
+    await expect(drive.write('large.bin',content)).rejects.toThrow('выгрузке');expect(chunks).toBe(1);
+  });
   it('does not retry an ambiguous create response',async()=>{
     const {drive,calls}=setup(p=>{
       if(p.url.includes('/files/root?'))return reply(folder);

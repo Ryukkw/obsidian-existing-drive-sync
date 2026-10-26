@@ -6,6 +6,8 @@ import { SyncState, synchronize } from './engine';
 import { excluded } from './model';
 import { SyncProgress, progressTitle } from './progress';
 import { ProgressModal, ProgressView } from './progress-view';
+import { ProgressBanner } from './progress-banner';
+import { checkActive, SyncCancelledError } from './sync-control';
 interface Settings { folderId: string; folderName: string; enabled: boolean }
 const SECRET = 'existing-drive-sync-google';
 export default class DriveSyncPlugin extends Plugin {
@@ -15,7 +17,8 @@ export default class DriveSyncPlugin extends Plugin {
   private deviceId = ''; private statePath = '';
   readonly progress = new SyncProgress();
   private progressModal?:ProgressModal;
-  private liveNotice?:Notice;
+  private banner?:ProgressBanner;
+  private syncController?:AbortController;
   async onload(): Promise<void> {
     this.settings = {...this.settings,...await this.loadData()};
     this.deviceId = this.app.loadLocalStorage('existing-drive-sync-device') ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -23,6 +26,8 @@ export default class DriveSyncPlugin extends Plugin {
     this.statePath = `.drive-sync-state/${this.deviceId}.json`;
     this.status = this.addStatusBarItem(); this.status.setText('Drive: ожидание');
     this.addSettingTab(new SettingsTab(this.app,this));
+    this.banner=new ProgressBanner(document.body,this.progress,()=>this.showProgress());
+    this.register(()=>this.banner?.destroy());
     this.register(this.progress.subscribe(state=>this.status.setText(`Drive: ${progressTitle(state)}`)));
     this.addCommand({id:'show-sync-progress',name:'Показать ход синхронизации',callback:()=>this.showProgress()});
     this.addCommand({id:'sync-now',name:'Синхронизировать сейчас',callback:()=>void this.sync(true)});
@@ -38,7 +43,7 @@ export default class DriveSyncPlugin extends Plugin {
     this.registerInterval(window.setInterval(()=>{if (!document.hidden) this.schedule(500);},60_000));
     this.app.workspace.onLayoutReady(()=>this.schedule(1500));
   }
-  onunload(): void { this.stopped = true; window.clearTimeout(this.timer);this.liveNotice?.hide();this.progressModal?.close(); }
+  onunload(): void { this.stopped = true; window.clearTimeout(this.timer);this.syncController?.abort();this.progress.dispose();this.progressModal?.close(); }
   showProgress():void {
     this.progressModal??=new ProgressModal(this.app,this.progress);this.progressModal.show();
   }
@@ -66,49 +71,38 @@ export default class DriveSyncPlugin extends Plugin {
   }
   async sync(manual=false): Promise<void> {
     if(this.stopped)return;
-    if(this.running){if(manual)this.showProgress();else this.pending=true;return;}
+    if(this.running){if(manual)this.banner?.reveal();else this.pending=true;return;}
     if (!manual && !this.settings.enabled) return;
     if (!this.settings.folderId) {if(manual) new Notice('Укажите папку Google Drive в настройках плагина.');return;}
     this.running = true; this.pending = false; window.clearTimeout(this.timer);
+    const controller=new AbortController();this.syncController=controller;
     const report=this.progress.begin();
-    if(manual)this.showProgress();
-    let noticeLabel:HTMLElement|undefined;
-    const unsubscribe=this.progress.subscribe(state=>{if(noticeLabel)noticeLabel.textContent=progressTitle(state);});
-    // Keep long runs visible on mobile even after the progress window is closed.
-    const noticeTimer=window.setTimeout(()=>{
-      if(this.stopped||!this.running)return;
-      const fragment=document.createDocumentFragment();
-      const content=fragment.appendChild(document.createElement('div'));content.className='existing-drive-sync-notice';
-      noticeLabel=content.appendChild(document.createElement('span'));
-      noticeLabel.textContent=progressTitle(this.progress.snapshot());
-      const button=content.appendChild(document.createElement('button'));button.textContent='Показать прогресс';
-      button.addEventListener('click',event=>{event.stopPropagation();this.showProgress();});
-      this.liveNotice=new Notice(fragment,0);
-    },1200);
     let succeeded = false;
     try {
       const credentials = this.credentials();
       const root = this.settings.folderId;
-      await this.loadState(root);
-      const remote = new Drive(credentials,root,this.app.vault.configDir);
+      await this.loadState(root);checkActive(controller.signal);
+      const remote = new Drive(credentials,root,this.app.vault.configDir,undefined,controller.signal);
       const save = async () => {
-        if (!await this.app.vault.adapter.exists('.drive-sync-state')) await this.app.vault.adapter.mkdir('.drive-sync-state');
+        checkActive(controller.signal);
+        if (!await this.app.vault.adapter.exists('.drive-sync-state')) {checkActive(controller.signal);await this.app.vault.adapter.mkdir('.drive-sync-state');}
+        checkActive(controller.signal);
         await this.app.vault.adapter.write(this.statePath,JSON.stringify(this.state));
       };
       // Persist the root binding before the first write, even if initial sync is interrupted.
       await save();
-      const result = await synchronize(new Local(this.app.vault),remote,this.state,save,
-        report);
-      this.progress.finish(result);
-      if (manual || result.conflicts) new Notice(`Google Drive: отправлено ${result.uploaded}, загружено ${result.downloaded}, конфликтов ${result.conflicts}, удалений ${result.deleted}.`,8000);
+      const result = await synchronize(new Local(this.app.vault,controller.signal),remote,this.state,save,
+        report,controller.signal);
+      this.running=false;
+      this.progress.finish(result,report.runId);
       succeeded = true;
     } catch (error) {
       const message=error instanceof Error ? error.message : 'Ошибка синхронизации Google Drive.';
-      this.progress.fail(message);
-      if(!this.stopped)new Notice(message,10000);
+      this.running=false;
+      if(!this.stopped && !(error instanceof SyncCancelledError))this.progress.fail(message,report.runId);
       // Never log credentials, request bodies, or OAuth responses.
     } finally {
-      window.clearTimeout(noticeTimer);unsubscribe();this.liveNotice?.hide();this.liveNotice=undefined;
+      if(this.syncController===controller)this.syncController=undefined;
       this.running = false;
       if (succeeded && this.pending && !this.stopped) this.schedule(3000);
     }

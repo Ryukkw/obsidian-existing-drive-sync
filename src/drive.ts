@@ -1,3 +1,4 @@
+import { checkActive } from './sync-control';
 import { requestUrl, RequestUrlParam, RequestUrlResponse } from 'obsidian';
 import { excluded, FileInfo, hash, Index, validPath } from './model';
 import { RemoteStore } from './engine';
@@ -11,13 +12,15 @@ export class Drive implements RemoteStore {
   private token = ''; private expires = 0;
   private folders = new Map<string, string>();
   constructor(private credentials: Credentials, private root: string, private configDir: string,
-    private transport: (params: RequestUrlParam) => Promise<RequestUrlResponse> = requestUrl) { this.folders.set('', this.root); }
+    private transport: (params: RequestUrlParam) => Promise<RequestUrlResponse> = requestUrl, private signal?:AbortSignal) { this.folders.set('', this.root); }
   private async accessToken(): Promise<string> {
+    checkActive(this.signal);
     if (this.token && Date.now() < this.expires) return this.token;
     const response = await this.transport({url:'https://oauth2.googleapis.com/token', method:'POST',
       contentType:'application/x-www-form-urlencoded', throw:false,
       body: new URLSearchParams({client_id:this.credentials.clientId, client_secret:this.credentials.clientSecret,
         refresh_token:this.credentials.refreshToken, grant_type:'refresh_token'}).toString()});
+    checkActive(this.signal);
     if (response.status !== 200) throw new Error('Не удалось обновить вход Google. Повторите авторизацию (OAuth-приложение в режиме Testing может терять доступ через 7 дней).');
     this.token = response.json.access_token;
     this.expires = Date.now() + Math.max(0, Number(response.json.expires_in) - 60) * 1000;
@@ -25,8 +28,9 @@ export class Drive implements RemoteStore {
   }
   private async request(params: RequestUrlParam): Promise<RequestUrlResponse> {
     for (let attempt = 0; attempt < 4; attempt++) {
-      const token = await this.accessToken();
+      const token = await this.accessToken();checkActive(this.signal);
       const response = await this.transport({...params, throw:false, headers:{...params.headers, Authorization:`Bearer ${token}`}});
+      checkActive(this.signal);
       if (response.status === 401 && attempt === 0) { this.token = ''; continue; }
       // Retry only reads: retrying creates after an ambiguous response can duplicate Drive files.
       if ((params.method ?? 'GET') === 'GET' && (response.status === 429 || response.status >= 500) && attempt < 3) {
@@ -74,7 +78,7 @@ export class Drive implements RemoteStore {
     const result: Index = Object.create(null); this.folders.clear(); this.folders.set('', this.root);
     const queue = [{id:this.root, path:''}]; const visited = new Set<string>();let completed=0;
     for (let i = 0; i < queue.length; i++) {
-      const parent = queue[i];
+      const parent = queue[i];report(completed,parent.path);
       if (visited.has(parent.id)) throw new Error('Повторная папка в Google Drive.');
       visited.add(parent.id);
       const names = new Set<string>();

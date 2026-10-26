@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.4
+
+- Show a compact floating progress panel at the top of Obsidian, including while editing notes on iPhone.
+- Open detailed progress only when the panel, settings button or progress command is clicked; manual sync no longer opens a modal automatically.
+- Show current operation, percentage and file counter. Dismiss the panel for the current run or let it hide five seconds after success.
+- Label a failed attempt as the last run's error, clear it on a fresh run, and ignore terminal notifications from superseded sessions.
+- Abort old synchronization sessions on plugin unload/reload, including remaining upload chunks and local writes after an outstanding download.
+- Wait for both discovery tasks to settle before reporting failure or allowing the next run.
+
+Validation: 64 automated tests; production banner checked in a 390×844 mobile browser viewport using Obsidian's theme, including overflow, dismissal, detail clicks, stale errors and automatic hiding. Physical iPhone verification remains pending.
+
 ## 0.1.3
 
 - Add a live progress window that opens on manual sync and can be reopened from settings or the command palette.

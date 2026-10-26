@@ -4,7 +4,9 @@ export type ProgressEvent =
   | {kind:'scan'; source:'local'|'remote'; completed:number; path?:string}
   | {kind:'plan'; total:number}
   | {kind:'file'; path:string; action:Action; completed:number; total:number; counts:Counts};
+export interface ProgressReporter { (event:ProgressEvent):void; readonly runId:number }
 export interface ProgressSnapshot {
+  runId:number;
   phase:'idle'|'preparing'|'scanning'|'syncing'|'done'|'error';
   completed:number;
   total?:number;
@@ -18,7 +20,7 @@ export interface ProgressSnapshot {
   error?:string;
 }
 const emptyCounts = (): Counts => ({uploaded:0,downloaded:0,conflicts:0,deleted:0});
-const initial = (): ProgressSnapshot => ({phase:'idle',completed:0,localScanned:0,remoteScanned:0,counts:emptyCounts()});
+const initial = (): ProgressSnapshot => ({runId:0,phase:'idle',completed:0,localScanned:0,remoteScanned:0,counts:emptyCounts()});
 export class SyncProgress {
   private state = initial();
   private listeners = new Set<(state:ProgressSnapshot)=>void>();
@@ -33,10 +35,10 @@ export class SyncProgress {
     try {listener(this.snapshot());} catch { /* The next update can redraw a surviving view. */ }
   }
   private emit():void {for(const listener of this.listeners)this.notify(listener);}
-  begin():(event:ProgressEvent)=>void {
+  begin():ProgressReporter {
     const generation=++this.generation;
-    this.state={...initial(),phase:'preparing',startedAt:Date.now()};this.emit();
-    return event=>{
+    this.state={...initial(),runId:generation,phase:'preparing',startedAt:Date.now()};this.emit();
+    const reporter:ProgressReporter=Object.assign((event:ProgressEvent)=>{
       if(generation!==this.generation || this.state.phase==='error' || this.state.phase==='done')return;
       if(event.kind==='scan'){
         this.state.phase='scanning';
@@ -49,12 +51,15 @@ export class SyncProgress {
         this.state.completed=event.completed;this.state.total=event.total;this.state.counts={...event.counts};
       }
       this.emit();
-    };
+    },{runId:generation});
+    return reporter;
   }
-  finish(counts:Counts):void {
+  finish(counts:Counts,runId=this.generation):void {
+    if(runId!==this.generation)return;
     this.state={...this.state,phase:'done',completed:this.state.total??0,counts:{...counts},path:undefined,action:undefined,finishedAt:Date.now()};this.emit();
   }
-  fail(message:string):void {this.state={...this.state,phase:'error',error:message,finishedAt:Date.now()};this.emit();}
+  dispose():void {this.generation++;this.listeners.clear();}
+  fail(message:string,runId=this.generation):void {if(runId!==this.generation)return;this.state={...this.state,phase:'error',error:message,finishedAt:Date.now()};this.emit();}
 }
 export function progressTitle(state:ProgressSnapshot):string {
   switch(state.phase){
@@ -63,7 +68,7 @@ export function progressTitle(state:ProgressSnapshot):string {
     case 'scanning':return 'Проверяем файлы на устройстве и в Google Drive…';
     case 'syncing':return `Обработано ${state.completed} из ${state.total??0} файлов`;
     case 'done':return 'Синхронизация завершена';
-    case 'error':return 'Синхронизация остановлена';
+    case 'error':return 'Ошибка последнего запуска';
   }
 }
 export function progressPercent(state:ProgressSnapshot):number|undefined {

@@ -45,6 +45,25 @@ describe('progress tracking',()=>{
     old({kind:'scan',source:'remote',completed:999});
     expect(progress.snapshot()).toMatchObject({phase:'syncing',total:10,remoteScanned:0});
   });
+  it('ignores a late terminal error or completion from a superseded run',()=>{
+    const progress=new SyncProgress();const old=progress.begin();const current=progress.begin();
+    current({kind:'plan',total:3});
+    progress.fail('stale error',old.runId);progress.finish(zero,old.runId);
+    expect(progress.snapshot()).toMatchObject({phase:'syncing',total:3,runId:current.runId});
+    expect(progress.snapshot().error).toBeUndefined();
+  });
+  it('does not keep reporting a previous error during a fresh run',()=>{
+    const progress=new SyncProgress();progress.begin();progress.fail('network');
+    const current=progress.begin();current({kind:'scan',source:'remote',completed:2});
+    expect(progressTitle(progress.snapshot())).toContain('Проверяем');
+    expect(progress.snapshot().error).toBeUndefined();
+  });
+  it('invalidates an unloaded plugin session before its outstanding requests finish',()=>{
+    const progress=new SyncProgress();const report=progress.begin();progress.dispose();
+    report({kind:'plan',total:999});progress.fail('late',report.runId);progress.finish(zero,report.runId);
+    expect(progress.snapshot().phase).toBe('preparing');
+    expect(progress.snapshot().error).toBeUndefined();
+  });
   it('allows a successful empty vault without division by zero',()=>{
     const progress=new SyncProgress();const report=progress.begin();report({kind:'plan',total:0});
     expect(progressPercent(progress.snapshot())).toBeUndefined();progress.finish(zero);
@@ -82,6 +101,23 @@ describe('progress from the actual sync engine',()=>{
     const {local,remote,state}=stores();const progress=new SyncProgress();const report=progress.begin();
     await expect(synchronize(local,remote,state,async()=>{throw new Error('disk full');},report)).rejects.toThrow('disk full');
     progress.fail('disk full');expect(progress.snapshot()).toMatchObject({phase:'error',completed:0,total:1});
+  });
+  it('waits for the other scanner to settle before returning an error',async()=>{
+    const {local,remote,state}=stores();let release!:()=>void;let started!:()=>void;
+    const pending=new Promise<void>(resolve=>release=resolve);const ready=new Promise<void>(resolve=>started=resolve);
+    local.scan=async()=>{throw new Error('local error');};
+    remote.scan=async()=>{started();await pending;return {};};
+    let finished=false;
+    const run=synchronize(local,remote,state,async()=>{}).catch(error=>{finished=true;throw error;});
+    await ready;await Promise.resolve();expect(finished).toBe(false);
+    release();await expect(run).rejects.toThrow('local error');
+  });
+  it('cancels an old download on plugin unload before it can replace a local file',async()=>{
+    const {local,remote,state}=stores();const controller=new AbortController();let writes=0;
+    local.scan=async()=>({});remote.scan=async()=>({'a.md':file});
+    remote.read=async()=>{controller.abort();return bytes;};local.write=async()=>{writes++;};
+    await expect(synchronize(local,remote,state,async()=>{},()=>{},controller.signal)).rejects.toThrow('выгрузке');
+    expect(writes).toBe(0);expect(state.base['a.md']).toBeUndefined();
   });
   it('reports a failed scan with no manufactured transfer plan',async()=>{
     const {local,remote,state}=stores();const progress=new SyncProgress();const report=progress.begin();
