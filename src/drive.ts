@@ -68,11 +68,11 @@ export class Drive implements RemoteStore {
     } while (page);
     return result.sort((a,b)=>a.name.localeCompare(b.name,'ru') || a.id.localeCompare(b.id));
   }
-  async scan(): Promise<Index> {
+  async scan(report:(completed:number,path?:string)=>void = ()=>{}): Promise<Index> {
     const root = await this.metadata(this.root);
     if (root.mimeType !== FOLDER || root.labels?.trashed) throw new Error('Выбранная папка Google Drive недоступна.');
     const result: Index = Object.create(null); this.folders.clear(); this.folders.set('', this.root);
-    const queue = [{id:this.root, path:''}]; const visited = new Set<string>();
+    const queue = [{id:this.root, path:''}]; const visited = new Set<string>();let completed=0;
     for (let i = 0; i < queue.length; i++) {
       const parent = queue[i];
       if (visited.has(parent.id)) throw new Error('Повторная папка в Google Drive.');
@@ -88,7 +88,7 @@ export class Drive implements RemoteStore {
         if (file.mimeType === FOLDER) { this.folders.set(path, file.id); queue.push({id:file.id,path}); }
         else {
           if (!file.md5Checksum || !file.etag) throw new Error(`Неподдерживаемый файл Google Drive: ${path}. Ярлыки и Google Docs нужно убрать из папки заметок или экспортировать в обычные файлы.`);
-          result[path] = {id:file.id, etag:file.etag, hash:file.md5Checksum};
+          result[path] = {id:file.id, etag:file.etag, hash:file.md5Checksum};report(++completed,path);
         }
       }
     }

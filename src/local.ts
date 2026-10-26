@@ -3,14 +3,14 @@ import { LocalStore } from './engine';
 import { excluded, hash, Index, validPath } from './model';
 export class Local implements LocalStore {
   constructor(private vault: Vault) {}
-  async scan(): Promise<Index> {
-    const index: Index = Object.create(null); const queue = [''];
+  async scan(report:(completed:number,path?:string)=>void = ()=>{}): Promise<Index> {
+    const index: Index = Object.create(null); const queue = ['']; let completed=0;
     for (let i=0; i<queue.length; i++) {
       const listing = await this.vault.adapter.list(queue[i]);
       for (const folder of listing.folders) if (!excluded(folder,this.vault.configDir)) queue.push(validPath(folder));
       for (const path of listing.files) {
         validPath(path); if (excluded(path,this.vault.configDir)) continue;
-        index[path] = {hash:hash(await this.read(path))};
+        index[path] = {hash:hash(await this.read(path))};report(++completed,path);
       }
     }
     return index;

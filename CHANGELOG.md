@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3
+
+- Add a live progress window that opens on manual sync and can be reopened from settings or the command palette.
+- Show scanning counts, processed/total files, percentage, current file and operation, and upload/download/conflict/deletion totals.
+- Keep long-running synchronization visible through a persistent mobile notification.
+- Keep errors and partial progress visible in the progress window and settings until the next run.
+- Advance the completed counter only after each file action is checkpointed. Discovery uses an indeterminate bar until the total is known.
+
 ## 0.1.2
 
 - Fix false HTTP 412 errors when downloading unchanged files from Google Drive. Metadata ETags are no longer sent as media preconditions; downloaded content is still verified against the scanned MD5 checksum.

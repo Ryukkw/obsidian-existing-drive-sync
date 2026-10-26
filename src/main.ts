@@ -4,6 +4,8 @@ import { Local } from './local';
 import { FolderPicker } from './folder-picker';
 import { SyncState, synchronize } from './engine';
 import { excluded } from './model';
+import { SyncProgress, progressTitle } from './progress';
+import { ProgressModal, ProgressView } from './progress-view';
 interface Settings { folderId: string; folderName: string; enabled: boolean }
 const SECRET = 'existing-drive-sync-google';
 export default class DriveSyncPlugin extends Plugin {
@@ -11,6 +13,9 @@ export default class DriveSyncPlugin extends Plugin {
   private running = false; private stopped = false; private pending = false;
   private timer?: number; private status!: HTMLElement; private state!: SyncState;
   private deviceId = ''; private statePath = '';
+  readonly progress = new SyncProgress();
+  private progressModal?:ProgressModal;
+  private liveNotice?:Notice;
   async onload(): Promise<void> {
     this.settings = {...this.settings,...await this.loadData()};
     this.deviceId = this.app.loadLocalStorage('existing-drive-sync-device') ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -18,6 +23,8 @@ export default class DriveSyncPlugin extends Plugin {
     this.statePath = `.drive-sync-state/${this.deviceId}.json`;
     this.status = this.addStatusBarItem(); this.status.setText('Drive: ожидание');
     this.addSettingTab(new SettingsTab(this.app,this));
+    this.register(this.progress.subscribe(state=>this.status.setText(`Drive: ${progressTitle(state)}`)));
+    this.addCommand({id:'show-sync-progress',name:'Показать ход синхронизации',callback:()=>this.showProgress()});
     this.addCommand({id:'sync-now',name:'Синхронизировать сейчас',callback:()=>void this.sync(true)});
     this.addRibbonIcon('refresh-cw','Синхронизировать Google Drive',()=>void this.sync(true));
     const changed = (path: string) => { if (!excluded(path,this.app.vault.configDir)) this.schedule(); };
@@ -31,7 +38,10 @@ export default class DriveSyncPlugin extends Plugin {
     this.registerInterval(window.setInterval(()=>{if (!document.hidden) this.schedule(500);},60_000));
     this.app.workspace.onLayoutReady(()=>this.schedule(1500));
   }
-  onunload(): void { this.stopped = true; window.clearTimeout(this.timer); }
+  onunload(): void { this.stopped = true; window.clearTimeout(this.timer);this.liveNotice?.hide();this.progressModal?.close(); }
+  showProgress():void {
+    this.progressModal??=new ProgressModal(this.app,this.progress);this.progressModal.show();
+  }
   async saveSettings(): Promise<void> { await this.saveData(this.settings); }
   private schedule(delay=2500): void {
     if (this.stopped || !this.settings.enabled) return;
@@ -55,11 +65,26 @@ export default class DriveSyncPlugin extends Plugin {
     } else this.state = {rootId,base:Object.create(null)};
   }
   async sync(manual=false): Promise<void> {
-    if (this.running || this.stopped) {if (this.running) this.pending = true;return;}
+    if(this.stopped)return;
+    if(this.running){if(manual)this.showProgress();else this.pending=true;return;}
     if (!manual && !this.settings.enabled) return;
     if (!this.settings.folderId) {if(manual) new Notice('Укажите папку Google Drive в настройках плагина.');return;}
     this.running = true; this.pending = false; window.clearTimeout(this.timer);
-    this.status.setText('Drive: синхронизация…');
+    const report=this.progress.begin();
+    if(manual)this.showProgress();
+    let noticeLabel:HTMLElement|undefined;
+    const unsubscribe=this.progress.subscribe(state=>{if(noticeLabel)noticeLabel.textContent=progressTitle(state);});
+    // Keep long runs visible on mobile even after the progress window is closed.
+    const noticeTimer=window.setTimeout(()=>{
+      if(this.stopped||!this.running)return;
+      const fragment=document.createDocumentFragment();
+      const content=fragment.appendChild(document.createElement('div'));content.className='existing-drive-sync-notice';
+      noticeLabel=content.appendChild(document.createElement('span'));
+      noticeLabel.textContent=progressTitle(this.progress.snapshot());
+      const button=content.appendChild(document.createElement('button'));button.textContent='Показать прогресс';
+      button.addEventListener('click',event=>{event.stopPropagation();this.showProgress();});
+      this.liveNotice=new Notice(fragment,0);
+    },1200);
     let succeeded = false;
     try {
       const credentials = this.credentials();
@@ -73,15 +98,17 @@ export default class DriveSyncPlugin extends Plugin {
       // Persist the root binding before the first write, even if initial sync is interrupted.
       await save();
       const result = await synchronize(new Local(this.app.vault),remote,this.state,save,
-        message=>this.status.setText(`Drive: ${message}`));
-      this.status.setText(`Drive: обновлено ${new Date().toLocaleTimeString()}`);
+        report);
+      this.progress.finish(result);
       if (manual || result.conflicts) new Notice(`Google Drive: отправлено ${result.uploaded}, загружено ${result.downloaded}, конфликтов ${result.conflicts}, удалений ${result.deleted}.`,8000);
       succeeded = true;
     } catch (error) {
-      this.status.setText('Drive: ошибка — откройте синхронизацию');
-      new Notice(error instanceof Error ? error.message : 'Ошибка синхронизации Google Drive.',10000);
+      const message=error instanceof Error ? error.message : 'Ошибка синхронизации Google Drive.';
+      this.progress.fail(message);
+      if(!this.stopped)new Notice(message,10000);
       // Never log credentials, request bodies, or OAuth responses.
     } finally {
+      window.clearTimeout(noticeTimer);unsubscribe();this.liveNotice?.hide();this.liveNotice=undefined;
       this.running = false;
       if (succeeded && this.pending && !this.stopped) this.schedule(3000);
     }
@@ -113,10 +140,17 @@ export default class DriveSyncPlugin extends Plugin {
   isRunning(): boolean {return this.running;}
 }
 class SettingsTab extends PluginSettingTab {
-  constructor(app: App, private plugin: DriveSyncPlugin) {super(app,plugin);}
+  private stopProgress?:()=>void;
+  hide():void {this.stopProgress?.();this.stopProgress=undefined;}
+  constructor(app: App, private plugin: DriveSyncPlugin) {super(app,plugin);plugin.register(()=>this.hide());}
   display(): void {
+    this.stopProgress?.();
     const el = this.containerEl; el.empty();
     el.createEl('h2',{text:'Google Drive — существующее хранилище'});
+    const progressView=new ProgressView(el);
+    this.stopProgress=this.plugin.progress.subscribe(state=>progressView.update(state));
+    new Setting(el).setName('Ход синхронизации').setDesc('Текущий этап, обработанные файлы и результат последнего запуска.')
+      .addButton(button=>button.setButtonText('Показать прогресс').onClick(()=>this.plugin.showProgress()));
     el.createEl('p',{text:'На iPhone используйте локальное хранилище без iCloud. Синхронизируются все обычные файлы и вложения. Настройки Obsidian, служебное состояние и резервные копии исключены.'});
     new Setting(el).setName('Хранилище в Google Drive')
       .setDesc(this.plugin.settings.folderId ? `Выбрано: ${this.plugin.settings.folderName || this.plugin.settings.folderId}. Синхронизируется весь vault.` : 'Выберите папку vault. Все её заметки, вложения и подпапки будут синхронизироваться целиком.')

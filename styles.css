@@ -1,0 +1,23 @@
+.existing-drive-sync-progress {
+  min-width: 0;
+  padding: var(--size-4-4);
+  margin-bottom: var(--size-4-4);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+}
+.existing-drive-sync-progress > * {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.existing-drive-sync-progress strong { display: block; }
+.existing-drive-sync-progress p { color: var(--text-muted); margin: var(--size-4-2) 0; }
+.existing-drive-sync-progress progress { display: block; width: 100%; margin: var(--size-4-3) 0; accent-color: var(--interactive-accent); }
+.existing-drive-sync-progress progress[hidden] { display: none; }
+.existing-drive-sync-path { margin-top: var(--size-4-2); color: var(--text-muted); font-size: var(--font-smaller); }
+.existing-drive-sync-stats { font-size: var(--font-smaller); }
+.existing-drive-sync-progress[data-phase="error"] strong { color: var(--text-error); }
+.existing-drive-sync-progress[data-phase="done"] strong { color: var(--text-success); }
+
+.existing-drive-sync-notice { display: flex; flex-direction: column; align-items: flex-start; gap: var(--size-4-2); min-width: 0; overflow-wrap: anywhere; }

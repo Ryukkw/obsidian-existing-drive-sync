@@ -2,12 +2,12 @@ import { mkdir, copyFile, writeFile, rm, cp, readFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 const directory='dist/existing-drive-sync';
 await mkdir(directory,{recursive:true});
-for (const name of ['main.js','manifest.json','README.md']) await copyFile(name,`${directory}/${name}`);
+for (const name of ['main.js','manifest.json','styles.css','README.md']) await copyFile(name,`${directory}/${name}`);
 await rm('dist/existing-drive-sync.zip',{force:true});
 execFileSync('zip',['-qr','existing-drive-sync.zip','existing-drive-sync'],{cwd:'dist'});
 const starter='dist/Drive Notes/.obsidian/plugins/existing-drive-sync';
 await mkdir(starter,{recursive:true});
-for (const name of ['main.js','manifest.json']) await copyFile(name,`${starter}/${name}`);
+for (const name of ['main.js','manifest.json','styles.css']) await copyFile(name,`${starter}/${name}`);
 
 await writeFile('dist/Drive Notes/.obsidian/community-plugins.json',JSON.stringify(['existing-drive-sync']));
 await rm('dist/Drive Notes/Начните здесь.md',{force:true});
@@ -55,7 +55,7 @@ console.log('Также готов: dist/Vault-1-iPhone.zip');
 // A separate flat archive makes both plugin files visible in iOS Files before installation.
 execFileSync('python3',['-c',`import zipfile
 with zipfile.ZipFile('dist/Drive-Sync-plugin-files.zip','w',zipfile.ZIP_DEFLATED) as archive:
-    for name in ('main.js','manifest.json'):
+    for name in ('main.js','manifest.json','styles.css'):
         archive.write(name,name)
 `]);
 console.log('Видимые файлы плагина: dist/Drive-Sync-plugin-files.zip');
