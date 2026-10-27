@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Notice, Plugin, PluginSettingTab, Setting, TextFileView } from 'obsidian';
 import { Credentials, Drive } from './drive';
 import { Local } from './local';
 import { FolderPicker } from './folder-picker';
@@ -8,12 +8,14 @@ import { SyncProgress, progressTitle } from './progress';
 import { ProgressModal, ProgressView } from './progress-view';
 import { ProgressBanner } from './progress-banner';
 import { checkActive, SyncCancelledError } from './sync-control';
+import { LifecycleSync } from './lifecycle-sync';
 interface Settings { folderId: string; folderName: string; enabled: boolean }
 const SECRET = 'existing-drive-sync-google';
 export default class DriveSyncPlugin extends Plugin {
   settings: Settings = {folderId:'',folderName:'',enabled:false};
-  private running = false; private stopped = false; private pending = false;
-  private timer?: number; private status!: HTMLElement; private state!: SyncState;
+  private running = false; private stopped = false;
+  private lifecycle!:LifecycleSync;
+  private ready=false; private status!: HTMLElement; private state!: SyncState;
   private deviceId = ''; private statePath = '';
   readonly progress = new SyncProgress();
   private progressModal?:ProgressModal;
@@ -24,6 +26,13 @@ export default class DriveSyncPlugin extends Plugin {
     this.deviceId = this.app.loadLocalStorage('existing-drive-sync-device') ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     this.app.saveLocalStorage('existing-drive-sync-device',this.deviceId);
     this.statePath = `.drive-sync-state/${this.deviceId}.json`;
+    this.lifecycle=new LifecycleSync({
+      enabled:()=>this.settings.enabled&&Boolean(this.settings.folderId)&&Boolean(this.app.secretStorage.getSecret(SECRET)),
+      saveEditors:()=>this.saveOpenEditors(),
+      run:()=>this.performSync(),
+      persistPending:value=>this.app.saveLocalStorage('existing-drive-sync-pending',value),
+      onError:error=>{const report=this.progress.begin();this.progress.fail(error instanceof Error?error.message:'Не удалось сохранить заметки перед синхронизацией.',report.runId);},
+    },this.app.loadLocalStorage('existing-drive-sync-pending')===true);
     this.status = this.addStatusBarItem(); this.status.setText('Drive: ожидание');
     this.addSettingTab(new SettingsTab(this.app,this));
     this.banner=new ProgressBanner(document.body,this.progress,()=>this.showProgress());
@@ -32,28 +41,59 @@ export default class DriveSyncPlugin extends Plugin {
     this.addCommand({id:'show-sync-progress',name:'Показать ход синхронизации',callback:()=>this.showProgress()});
     this.addCommand({id:'sync-now',name:'Синхронизировать сейчас',callback:()=>void this.sync(true)});
     this.addRibbonIcon('refresh-cw','Синхронизировать Google Drive',()=>void this.sync(true));
-    const changed = (path: string) => { if (!excluded(path,this.app.vault.configDir)) this.schedule(); };
+    const changed = (path: string) => {
+      if(!this.ready||excluded(path,this.app.vault.configDir))return;
+      this.lifecycle.noteChange();
+      if(document.hidden)void this.lifecycle.request('background');else this.lifecycle.schedule(1000);
+    };
     this.registerEvent(this.app.vault.on('create',file=>changed(file.path)));
     this.registerEvent(this.app.vault.on('modify',file=>changed(file.path)));
     this.registerEvent(this.app.vault.on('delete',file=>changed(file.path)));
     this.registerEvent(this.app.vault.on('rename',(file,old)=>{changed(file.path);changed(old);}));
-    this.registerDomEvent(document,'visibilitychange',()=>{if (!document.hidden) this.schedule(500);});
-    this.registerDomEvent(window,'focus',()=>this.schedule(500));
-    this.registerDomEvent(window,'online',()=>this.schedule(500));
-    this.registerInterval(window.setInterval(()=>{if (!document.hidden) this.schedule(500);},60_000));
-    this.app.workspace.onLayoutReady(()=>this.schedule(1500));
+    this.registerEvent(this.app.workspace.on('editor-change',(_editor,info)=>{if(info.file)changed(info.file.path);}));
+    this.registerDomEvent(document,'visibilitychange',()=>{
+      if(!this.ready)return;
+      void this.lifecycle.request(document.hidden?'background':'resume');
+    });
+    this.registerDomEvent(window,'pagehide',()=>{if(this.ready)void this.lifecycle.request('background');});
+    this.registerDomEvent(window,'focus',()=>{if(this.ready)void this.lifecycle.request('resume');});
+    this.registerDomEvent(window,'online',()=>{if(this.ready)void this.lifecycle.request('resume');});
+    this.registerEvent(this.app.workspace.on('quit',tasks=>{tasks.add(()=>this.flushBeforeQuit());}));
+    this.registerInterval(window.setInterval(()=>{if(this.ready&&!document.hidden)void this.lifecycle.request('poll');},60_000));
+    this.app.workspace.onLayoutReady(()=>{
+      if(this.stopped)return;
+      this.ready=true;void this.lifecycle.request('startup');
+    });
   }
-  onunload(): void { this.stopped = true; window.clearTimeout(this.timer);this.syncController?.abort();this.progress.dispose();this.progressModal?.close(); }
+  onunload(): void { this.stopped = true;this.lifecycle?.dispose();this.syncController?.abort();this.progress.dispose();this.progressModal?.close(); }
+  private async saveOpenEditors():Promise<void> {
+    if(this.stopped)return;
+    const views:TextFileView[]=[];
+    const seen=new Set<string>();
+    this.app.workspace.iterateAllLeaves(leaf=>{
+      const view=leaf.view;
+      if(view instanceof TextFileView&&view.file&&!excluded(view.file.path,this.app.vault.configDir)&&!seen.has(view.file.path)){
+        seen.add(view.file.path);views.push(view);
+      }
+    });
+    for(const view of views){if(this.stopped)return;await view.save();}
+  }
+  private async flushBeforeQuit():Promise<void> {
+    if(this.stopped||!this.ready)return;
+    let timeout:ReturnType<typeof setTimeout>|undefined;
+    // Desktop quit can wait through Tasks; iOS force quit can bypass this event entirely.
+    try {
+      await Promise.race([
+        this.lifecycle.request('quit'),
+        new Promise<void>(resolve=>{timeout=setTimeout(()=>{this.syncController?.abort();resolve();},8000);}),
+      ]);
+    }finally{clearTimeout(timeout);}
+  }
+
   showProgress():void {
     this.progressModal??=new ProgressModal(this.app,this.progress);this.progressModal.show();
   }
   async saveSettings(): Promise<void> { await this.saveData(this.settings); }
-  private schedule(delay=2500): void {
-    if (this.stopped || !this.settings.enabled) return;
-    if (this.running) {this.pending = true;return;}
-    window.clearTimeout(this.timer);
-    this.timer = window.setTimeout(()=>void this.sync(),delay);
-  }
   private async loadState(rootId: string): Promise<void> {
     if (await this.app.vault.adapter.exists(this.statePath)) {
       const stored = JSON.parse(await this.app.vault.adapter.read(this.statePath));
@@ -71,10 +111,13 @@ export default class DriveSyncPlugin extends Plugin {
   }
   async sync(manual=false): Promise<void> {
     if(this.stopped)return;
-    if(this.running){if(manual)this.banner?.reveal();else this.pending=true;return;}
-    if (!manual && !this.settings.enabled) return;
-    if (!this.settings.folderId) {if(manual) new Notice('Укажите папку Google Drive в настройках плагина.');return;}
-    this.running = true; this.pending = false; window.clearTimeout(this.timer);
+    if(manual&&!this.settings.folderId){new Notice('Укажите папку Google Drive в настройках плагина.');return;}
+    if(manual&&this.lifecycle.busy){this.banner?.reveal();return;}
+    await this.lifecycle.request(manual?'manual':'resume');
+  }
+  private async performSync():Promise<boolean> {
+    if(this.stopped||!this.settings.folderId)return false;
+    this.running=true;
     const controller=new AbortController();this.syncController=controller;
     const report=this.progress.begin();
     let succeeded = false;
@@ -104,8 +147,8 @@ export default class DriveSyncPlugin extends Plugin {
     } finally {
       if(this.syncController===controller)this.syncController=undefined;
       this.running = false;
-      if (succeeded && this.pending && !this.stopped) this.schedule(3000);
     }
+    return succeeded;
   }
   private credentials(): Credentials {
     const text = this.app.secretStorage.getSecret(SECRET);
@@ -119,7 +162,7 @@ export default class DriveSyncPlugin extends Plugin {
     try {
       const drive=new Drive(this.credentials(),'root',this.app.vault.configDir);
       new FolderPicker(this.app,(id,shared)=>drive.listFolders(id,shared),async folder=>{
-        if(this.running) throw new Error('Дождитесь завершения синхронизации.');
+        if(this.isRunning()) throw new Error('Дождитесь завершения синхронизации.');
         if(await this.app.vault.adapter.exists(this.statePath)){
           const stored=JSON.parse(await this.app.vault.adapter.read(this.statePath));
           if(stored.rootId!==folder.id) throw new Error('Этот локальный vault уже связан с другой папкой. Для другого хранилища создайте отдельный локальный vault.');
@@ -131,7 +174,7 @@ export default class DriveSyncPlugin extends Plugin {
       }).open();
     } catch(error){new Notice(error instanceof Error?error.message:'Не удалось открыть Google Drive.');}
   }
-  isRunning(): boolean {return this.running;}
+  isRunning(): boolean {return this.running||this.lifecycle.busy;}
 }
 class SettingsTab extends PluginSettingTab {
   private stopProgress?:()=>void;
@@ -161,10 +204,10 @@ class SettingsTab extends PluginSettingTab {
           connection=''; this.display(); new Notice('Подключение сохранено на этом устройстве.');
         } catch {new Notice('Нужен JSON с clientId, clientSecret и refreshToken.');}
       }));
-    new Setting(el).setName('Автоматическая синхронизация').setDesc('При открытии, возвращении в приложение, после правок и раз в минуту, пока приложение видно.')
+    new Setting(el).setName('Автоматическая синхронизация').setDesc('Сразу при запуске и возвращении; через секунду после правок; немедленно при сворачивании. iOS может прервать отправку — следующий запуск повторит проверку.')
       .addToggle(toggle=>toggle.setValue(this.plugin.settings.enabled).onChange(async enabled=>{this.plugin.settings.enabled=enabled;await this.plugin.saveSettings();if(enabled) void this.plugin.sync(true);}));
     new Setting(el).setName('Синхронизировать сейчас').setDesc('Первая синхронизация объединяет файлы. При различиях сохраняются обе версии.')
       .addButton(button=>button.setButtonText('Синхронизировать').setCta().onClick(()=>void this.plugin.sync(true)));
-    el.createEl('p',{text:'Конфликты получают имя «… (conflict iPhone …)». Копии заменённых и удалённых локальных файлов находятся в .drive-sync-backups; удалённые облачные файлы — в корзине Google Drive. В закрытом приложении синхронизация не выполняется.'});
+    el.createEl('p',{text:'Конфликты получают имя «… (conflict iPhone …)». Копии заменённых и удалённых локальных файлов находятся в .drive-sync-backups; удалённые облачные файлы — в корзине Google Drive. При сворачивании плагин сохраняет открытые заметки и пробует отправить изменения. iOS может приостановить приложение; после следующего открытия проверка повторится.'});
   }
 }

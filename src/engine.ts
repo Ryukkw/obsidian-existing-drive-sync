@@ -42,11 +42,14 @@ export async function synchronize(local: LocalStore, remote: RemoteStore, state:
   };
   validateIndex(li); validateIndex(ri); validateIndex({...li, ...ri});
   const result: Counts = {uploaded: 0, downloaded: 0, conflicts: 0, deleted: 0};
-  const paths = [...new Set([...Object.keys(li), ...Object.keys(ri), ...Object.keys(state.base)])].sort();
+  const own = <T>(record: Record<string,T>, key: string): T | undefined => Object.prototype.hasOwnProperty.call(record,key) ? record[key] : undefined;
+  // Send local edits before spending the remaining foreground/background window on downloads.
+  const priority={upload:0,conflict:1,'delete-remote':2,download:3,'delete-local':4,equal:5,forget:5};
+  const rank=(path:string)=>priority[decide(own(li,path),own(ri,path),own(state.base,path))];
+  const paths = [...new Set([...Object.keys(li), ...Object.keys(ri), ...Object.keys(state.base)])].sort().sort((a,b)=>rank(a)-rank(b));
   report({kind:'plan',total:paths.length});
   for (const [position, path] of paths.entries()) {
     checkActive(signal);
-    const own = <T>(record: Record<string,T>, key: string): T | undefined => Object.prototype.hasOwnProperty.call(record,key) ? record[key] : undefined;
     const l = own(li,path), r = own(ri,path), base = own(state.base,path);
     const action = decide(l, r, base);
     report({kind:'file',path,action,completed:position,total:paths.length,counts:{...result}});

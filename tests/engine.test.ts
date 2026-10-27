@@ -81,6 +81,20 @@ describe('sync integration',()=>{
     await expect(f.run()).rejects.toThrow('offline');expect(f.state.base.a.hash).toBe(info('a').hash);expect(f.state.base.b).toBeUndefined();
     f.r.write=original;await f.run();expect(f.remote.size).toBe(2);
   });
+  it('sends local edits before downloading unrelated remote files',async()=>{
+    const f=fixture({'z-local.md':'local'},{'a-cloud.md':'cloud'});const events:string[]=[];
+    const write=f.r.write;const read=f.r.read;
+    f.r.write=async(...args)=>{events.push('upload');return write(...args);};
+    f.r.read=async(...args)=>{events.push('download');return read(...args);};
+    await f.run();expect(events).toEqual(['upload','download']);
+  });
+  it('uploads a renamed note before trashing its previous cloud path',async()=>{
+    const f=fixture({'z-new.md':'note'},{'a-old.md':'note'},{'a-old.md':'note'});const events:string[]=[];
+    const write=f.r.write;const remove=f.r.remove;
+    f.r.write=async(...args)=>{events.push('upload');return write(...args);};
+    f.r.remove=async(...args)=>{events.push('trash');return remove(...args);};
+    await f.run();expect(events).toEqual(['upload','trash']);
+  });
   it('handles a filename that matches an Object prototype key',async()=>{
     const f=fixture({'constructor':'hello'},{});await f.run();expect(f.remote.get('constructor')).toEqual(bytes('hello'));
   });

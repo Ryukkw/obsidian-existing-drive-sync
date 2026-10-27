@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.5
+
+- Start automatic sync immediately when the vault layout is ready, and again on foreground/network recovery.
+- Save open text editors and request an immediate sync on visibility-hidden/pagehide instead of waiting for the edit debounce.
+- Save and sync after a one-second pause in editing; prioritize local uploads before unrelated downloads.
+- Use one serialized lifecycle queue. Changes during an active pass receive an immediate follow-up pass, including while hidden.
+- Persist a device-local pending marker before saves/network requests and retain it on failure or unload. Startup performs a full reconciliation to recover unfinished changes.
+- Add a best-effort normal-quit task with an eight-second deadline. iOS suspension and force-quit can still interrupt/bypass background delivery.
+
+Validation: 77 automated tests and successful TypeScript/browser build. iPhone background completion is not guaranteed and requires device testing.
+
 ## 0.1.4
 
 - Show a compact floating progress panel at the top of Obsidian, including while editing notes on iPhone.
